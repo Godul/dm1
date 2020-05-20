@@ -1,0 +1,378 @@
+---
+title: "Data Mining - Project 1"
+author: "Jakub Godula, 370815"
+output:
+  html_notebook:
+    df_print: paged
+  html_document:
+    df_print: paged
+  word_document: default
+subtitle: Clash Royale Mining
+email: jg370815@students.mimuw.edu.pl
+---
+
+### Data
+Records in this data set describe decks of cards used in a popular collectible card video game Clash Royale. These decks were obtained using RoyaleAPI.com service, from games which took place in January 2019. Each record consists of five values:
+
+* a timestamp of the game (column timestamp),
+* arena ID (column arena_id – higher the arena, more skilled/experienced a player is)
+* outcome of a game (column has_won, 1 – the player won, 0 the player lost)
+* a player ID (column tag)
+* a list of exactly eight cards in the player’s deck separated by “_” signs (column player_deck)
+
+### Plan
+In this notebook I try to find some interesting patterns by looking into:
+
+* card combos that were particularly popular in January 2019
+* popular card combos that have high win-rates
+* card popularity depending on arena level
+* card popularity depending on day of the month
+* card popularity depending on time of the day
+* card association rules
+
+To interpret some observations, I've used some help from an indepentent expert (younger brother, who had an opportunity to play Clash Royale).
+
+```{r setup}
+# Uncomment to install libraries
+# install.packages(c("arules", "arulesViz", "lubridate", "plyr", "dplyr"))
+suppressPackageStartupMessages({
+  library(data.table)
+  library(arules)
+  library(arulesViz)
+  library(lubridate)
+  library(plyr)
+  library(dplyr)
+})
+```
+
+### Loading data
+In our dataset we have over 51 million games, that take up almost 5.5GB in csv format. It would be hard to do all the calculations on all the data on the machine that I have on my disposal (too little memory), so I've decided to sample the data. I'm loading our dataset in batches and sample every batch, to have $10$ million games sampled in the end, which is around $20\%$ of the original dataset. Batches number and sample size is configurable - feel free to change it.
+
+```{r}
+# Constants
+sampleSize = 10 ^ 7
+batches = 10
+csvSize = 51286000
+
+loadRows = csvSize / batches
+batchSize = sampleSize / batches
+
+loadedGames = data.table::fread("clash_royale_games_Jan_2019.csv", header = TRUE, nrows=loadRows)
+games = sample_n(loadedGames, batchSize)
+
+for (i in 1:(batches-1)) {
+  loadedGames = data.table::fread("clash_royale_games_Jan_2019.csv", header = FALSE, nrows=loadRows, skip=loadRows * i)
+  names(loadedGames) <- names(games)
+  games = rbind(games, sample_n(loadedGames, batchSize))
+}
+remove(loadedGames)
+
+setDT(games)
+games[, {player_deck := strsplit(player_deck, "_")}]
+games$timestamp = parse_date_time(games$timestamp, '%Y-%m-%d%H:%M:%S')
+
+get_transactions <- function(games) {
+  as(games[, player_deck], "transactions")
+}
+```
+
+### Most popular card combos
+Using apriori algorthm we can check most popular card combos of size 1-8.
+
+```{r, layout = "l-body-outset"}
+minSupport = 0.005
+
+frequentItemSets = apriori(get_transactions(games), parameter = list(supp = minSupport, minlen = 1, maxlen = 8, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+frequentItemSets = sort(frequentItemSets, decreasing = TRUE, na.last = NA, by = "support", order = FALSE)
+
+for (i in 1:8) {
+  inspect(head(frequentItemSets[which(size(frequentItemSets) == i)], n = 100))
+}
+remove(frequentItemSets)
+```
+
+We can clearly see that there are some very popular cards, such as _zap_ or _fireball_. If these cards are present in some popular combos with high winrates, we could suppose that they are used widely because of that. If not, we could presume that the reason is slightly different, e.g. they are easily obtainable or easy to use.
+
+Let's check the winrates then.
+
+### Popular card combos with high winrates
+We assume that popular card combos are those with over 1% support and ignore the rest. We aren't interested in winrates of rare combos, because they can be misrepresented.
+
+Here we have best 100 popular combinations in terms of winrate.
+
+```{r}
+minSupport = 0.01
+
+itemsets = apriori(get_transactions(games), parameter = list(support=minSupport, minlen=1, maxlen=8, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+winningItemsets = apriori(get_transactions(games[has_won == 1]), parameter = list(support=minSupport, minlen=1, maxlen=8, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+
+winrates = merge(as(itemsets, "data.frame"), as(winningItemsets, "data.frame"), by="items")
+remove(itemsets, winningItemsets)
+
+winrates = as(winrates, "data.table")
+winrates[, c("winrate")] = winrates[, count.y] / winrates[, count.x]
+winrates = winrates[order(winrates$winrate, decreasing = TRUE)]
+winrates[, count.x:=NULL]
+winrates[, count.y:=NULL]
+names(winrates)[2] = "support"
+winrates[, support.y:=NULL]
+
+head(winrates, n = 100)
+```
+
+It seems that our popular cards don't dominate most frequent card combos. Let's look at single card winrates, just to be sure.
+
+### Single card winrates
+
+```{r}
+minSupport = 0.001
+
+itemsets = apriori(get_transactions(games), parameter = list(support=minSupport, minlen=1, maxlen=1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+winningItemsets = apriori(get_transactions(games[has_won == 1]), parameter = list(support=minSupport, minlen=1, maxlen=1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+
+winrates = merge(as(itemsets, "data.frame"), as(winningItemsets, "data.frame"), by="items")
+remove(itemsets, winningItemsets)
+
+winrates = as(winrates, "data.table")
+winrates[, c("winrate")] = winrates[, count.y] / winrates[, count.x]
+winrates = winrates[order(winrates$winrate, decreasing = TRUE)]
+winrates[, count.x:=NULL]
+winrates[, count.y:=NULL]
+names(winrates)[2] = "support"
+winrates[, support.y:=NULL]
+
+head(winrates)
+```
+
+_zap_ and _fireball_ have below 50% winrate, so they probably are not used because of their power. This is expected as well - the game would be not so interesting if it had very unbalanced cards.
+
+Another hypothesis for _zap_ and _fireball_ popularity is that they are easily obtainable. E.g. they could be available at the beginning of the game. We could test our hypothesis by checking what happens with card popularity depending on arena level.
+
+### Card popularity depending on arena level
+Our data contains matches of players from arenas 12-20. First, let's check how much games we have of each arena.
+
+```{r}
+result = list()
+
+for (i in 12:20) {
+  result = c(result, nrow(games[arena_id == i]))
+}
+
+plot(12:20, result, type="l", xlab="Arena level", ylab="Games number", main="Total match number of arena level")
+```
+
+This is expected, arenas in this game have hierarchical structure - the higher arena level, the less players in it.
+
+Let's check the popularity of some cards depending on arena level.
+
+```{r}
+minSupport = 0.01
+
+transactionsOfArena = get_transactions(games[which(arena_id == 12)])
+frequentItemSetsOfArena = apriori(transactionsOfArena, parameter = list(supp = minSupport, minlen = 1, maxlen = 1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+frequentItemSetsOfArena = sort(frequentItemSetsOfArena, decreasing = TRUE, na.last = NA, by = "support", order = FALSE)
+frequentItemSetsOfArena = as(frequentItemSetsOfArena, "data.frame")
+names(frequentItemSetsOfArena)[2] = sprintf("support_arena_%s", 12)
+frequentItemSetsOfArena = within(frequentItemSetsOfArena, rm(count))
+result = frequentItemSetsOfArena
+
+for (i in 13:20) {
+  transactionsOfArena = get_transactions(games[which(arena_id == i)])
+  frequentItemSetsOfArena = apriori(transactionsOfArena, parameter = list(supp = minSupport, minlen = 1, maxlen = 1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+  frequentItemSetsOfArena = sort(frequentItemSetsOfArena, decreasing = TRUE, na.last = NA, by = "support", order = FALSE)
+  frequentItemSetsOfArena = as(frequentItemSetsOfArena, "data.frame")
+  names(frequentItemSetsOfArena)[2] = sprintf("support_arena_%s", i)
+  frequentItemSetsOfArena = within(frequentItemSetsOfArena, rm(count))  
+  result = join(result, frequentItemSetsOfArena, type="inner", by="items")
+}
+
+for (i in 1:20) {
+  plot(12:20, as.numeric(result[i,2:10][,]), type="l", xlab="Arena level", ylab="Popularity", main=sprintf("Popularity of %s by area level", as.character(result[i,1])))
+}
+
+remove(transactionsOfArena, frequentItemSetsOfArena, result)
+```
+
+We can see many different patterns.
+There are some cards with monotonic decrease, like _wizard_, _skeleton-army_ or _valkyrie_.
+And there are some cards like with monotonic increase, like _goblin-gang_.
+
+Our popular cards, _zap_ and _fireball_, have a significant peak in the "middle" arenas (15-16). This would contradict our hypothesis, but there is one more thing - in Clash Royale arenas start from 1 and our data is from arenas 12-20. These are actually 9 best arenas in the game, so we can't really reject our hypothesis. Some internet research shows that _zap_ and _fireball_ are indeed cards that are being obtained early in the game.
+
+One thing is sure - arena level significantly affects popularity of the card. This can be caused by some in-game mechanics. In Clash Royale it is probably leveling the cards - more experienced players can have different cards on higher level and it could make them more powerful. One other possible explaination is that some cards are better, but in more complicated strategies, so they are used more in higher arenas.
+
+### Card popularity depending on the day of the month
+
+Let's check how many games we have each day.
+
+```{r}
+result = list()
+
+for (i in 1:31) {
+  result = c(result, nrow(games[day(timestamp) == i]))
+}
+
+plot(1:31, result, type="l", xlab="Day", ylab="Games number", main="Total match number by day of the month")
+```
+Surprisingly, we do not see a regular pattern in traffic with peaks on weekends. We can see a huge peak in the weekend following New Year's Eve - people are probably tired of partying and spend more time playing video games. Them, next big peak is on 14.01 (Monday) and two smaller on 22.01 (Tuesday) and 29.01 (Tuesday).
+
+Let's calculate popularity of each card on each day from 01.01 to 31.01.
+
+```{r}
+minSupport = 0.01
+
+transactionsOfDay = get_transactions(games[which(day(games$timestamp) == 1)])
+frequentItemSetsOfDay = apriori(transactionsOfDay, parameter = list(supp = minSupport, minlen = 1, maxlen = 1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+frequentItemSetsOfDay = sort(frequentItemSetsOfDay, decreasing = TRUE, na.last = NA, by = "support", order = FALSE)
+frequentItemSetsOfDay = as(frequentItemSetsOfDay, "data.frame")
+names(frequentItemSetsOfDay)[2] = sprintf("support_day_%s", 1)
+frequentItemSetsOfDay = within(frequentItemSetsOfDay, rm(count))  
+result = frequentItemSetsOfDay
+
+for (i in 2:31) {
+  transactionsOfDay = get_transactions(games[which(day(games$timestamp) == i)])
+  frequentItemSetsOfDay = apriori(transactionsOfDay, parameter = list(supp = minSupport, minlen = 1, maxlen = 1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+  frequentItemSetsOfDay = sort(frequentItemSetsOfDay, decreasing = TRUE, na.last = NA, by = "support", order = FALSE)
+  frequentItemSetsOfDay = as(frequentItemSetsOfDay, "data.frame")
+  names(frequentItemSetsOfDay)[2] = sprintf("support_day_%s", i)
+  frequentItemSetsOfDay = within(frequentItemSetsOfDay, rm(count))  
+  result = join(result, frequentItemSetsOfDay, type="inner", by="items")
+}
+
+head(result, n = 30)
+
+for (i in 1:20) {
+  plot(1:31, as.numeric(result[i,2:32][,]), type="l", xlab="Day of the month", ylab="Popularity", main=sprintf("Popularity of %s by day", as.character(result[i, 1])))
+}
+remove(transactionsOfDay, frequentItemSetsOfDay, result)
+```
+
+We can clearly see some fluctuations, but we don't see any interesting patterns here.
+
+### Card popularity depending on time of the day
+
+We can also check how the traffic changes over the day by checking how many games are played every hour.
+
+```{r}
+result = list()
+
+for (i in 0:23) {
+  result = c(result, nrow(games[hour(timestamp) == i]))
+}
+
+plot(0:23, result, type="l", xlab="Hour", ylab="Games number", main="Total match number by hour")
+```
+
+There is a significant peak of traffic at 15:00.
+
+We can also calculate the popularity of each card for every hour (0-23).
+
+```{r}
+minSupport = 0.01
+
+  transactionsOfHour = get_transactions(games[which(hour(games$timestamp) == 0)])
+  frequentItemSetsOfHour = apriori(transactionsOfHour, parameter = list(supp = minSupport, minlen = 1, maxlen = 1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+  frequentItemSetsOfHour = sort(frequentItemSetsOfHour, decreasing = TRUE, na.last = NA, by = "support", order = FALSE)
+  frequentItemSetsOfHour = as(frequentItemSetsOfHour, "data.frame")
+  names(frequentItemSetsOfHour)[2] = sprintf("support_hour_%s", 0)
+  frequentItemSetsOfHour = within(frequentItemSetsOfHour, rm(count))
+  result = frequentItemSetsOfHour
+
+for (i in 1:23) {
+  transactionsOfHour = get_transactions(games[which(hour(games$timestamp) == i)])
+  frequentItemSetsOfHour = apriori(transactionsOfHour, parameter = list(supp = minSupport, minlen = 1, maxlen = 1, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+  frequentItemSetsOfHour = sort(frequentItemSetsOfHour, decreasing = TRUE, na.last = NA, by = "support", order = FALSE)
+  frequentItemSetsOfHour = as(frequentItemSetsOfHour, "data.frame")
+  names(frequentItemSetsOfHour)[2] = sprintf("support_hour_%s", i)
+  frequentItemSetsOfHour = within(frequentItemSetsOfHour, rm(count))  
+  result = join(result, frequentItemSetsOfHour, type="inner", by="items")
+}
+
+head(result, n = 30)
+
+for (i in 1:20) {
+  plot(0:23, as.numeric(result[i,2:25][,]), type="l", xlab="Hour", ylab="Popularity", main=sprintf("Popularity of %s by hour", as.character(result[i, 1])))
+}
+remove(transactionsOfHour, frequentItemSetsOfHour, result)
+```
+
+It seems that some cards gain popularity in the busiest times of the day, when most casual players are playing (15:00-00:00), e.g. _wizard_, _hog-rider_ or _valkyrie_. Similarly, there are cards with the lowest popularity in those hours, e.g. _the-log_, _goblin-gang_ or _bats_.
+
+### Cards association rules
+
+Using apriori algorithm, we can also look for some interesting association rules.
+
+In the beginning, let's look at the best rules in terms of lift, for any set size, with support at least $0.01$ and confidence at least $0.7$.
+
+```{r}
+minSupport = 0.01
+
+frequentItemSets = apriori(get_transactions(games), parameter = list(supp = minSupport, minlen = 2, maxlen = 8, target = "frequent itemsets"), appearance = NULL, control = list(verbose = FALSE))
+rules = ruleInduction(frequentItemSets, get_transactions(games), confidence = 0.7, control = list(method = "apriori", verbose = FALSE))
+rules = sort(rules, decreasing = TRUE, by = "lift")
+inspect(head(rules, n = 100))
+```
+
+#### Cannon, Musketeer and Skeletons
+Most of our rules are with _cannon_ card on the right side and some recurring cards on the left side. Our sets on the left side are quite big, so it's hard to reason about it. Let's look closer into it by allowing only sets of size 2 to be on the left side.
+
+```{r}
+minSupport = 0.01
+
+rules = apriori(get_transactions(games), parameter = list(supp = minSupport, conf = 0.5, minlen = 1, maxlen = 3, target = "rules"),
+                control = list(sort = -1, verbose = FALSE),
+                appearance = list(rhs = "cannon"))
+rules = sort(rules, decreasing = TRUE, by = "lift")
+
+inspect(head(rules, n = 10))
+plot(head(rules, n = 10), data = games, method="graph", engine="htmlwidget", shading = "lift")
+```
+
+We see that _musketeer_, _skeletons_ are cards that are often being complemented with _cannon_. We could speculate that it's because these cards have good synergy or _cannon_ helps to unleash the full potential of _musketeer_, _skeletons_.
+But is this relation symetrical? Let's check rules, where only _musketeer_ is allowed on the right side.
+
+```{r}
+minSupport = 0.01
+
+rules = apriori(get_transactions(games), parameter = list(supp = minSupport, conf = 0.5, minlen = 1, maxlen = 3, target = "rules"),
+                control = list(sort = -1, verbose = FALSE),
+                appearance = list(rhs = "musketeer"))
+rules = sort(rules, decreasing = TRUE, by = "lift")
+
+inspect(head(rules, n = 10))
+plot(head(rules, n = 10), data = games, method="graph", engine="htmlwidget", shading = "lift")
+```
+
+It turns out that _cannon_ is in most of the best sets that implicate _musketeer_, so the relation seems to be symetrical. Let's check the same for _skeletons_.
+
+```{r}
+minSupport = 0.01
+
+rules = apriori(get_transactions(games), parameter = list(supp = minSupport, conf = 0.5, minlen = 1, maxlen = 3, target = "rules"),
+                control = list(sort = -1, verbose = FALSE),
+                appearance = list(rhs = "skeletons"))
+rules = sort(rules, decreasing = TRUE, by = "lift")
+
+inspect(head(rules, n = 10))
+plot(head(rules, n = 10), data = games, method="graph", engine="htmlwidget", shading = "lift")
+```
+
+_cannon_ is in most of the best rules with _skeletons_ on the right side, so it turned out to be symetrical as well. It means that those three cards are often used as a set. Some internet research shows that each of these cards is of a different type - having multiple card types in one deck helps to counter opponent's moves.
+
+
+#### Tornado and Executioner
+Another interesting association that can be observed is the synergy between _tornado_ and _executioner_.
+
+```{r}
+minSupport = 0.001
+
+rules = apriori(get_transactions(games), parameter = list(supp = minSupport, conf = 0.5, minlen = 1, maxlen = 3, target = "rules"),
+                control = list(sort = -1, verbose = FALSE),
+                appearance = list(rhs = "executioner"))
+rules = sort(rules, decreasing = TRUE, by = "lift")
+
+inspect(head(rules, n = 10))
+plot(head(rules, n = 10), data = games, method="graph", engine="htmlwidget", shading = "lift")
+```
+
+We see that _tornado_ often implies _executioner_. It matches with internet guides that emphasise synergy of _tornado_ and _executioner_. In every recommended deck with _executioner_ there is also _tornado_.
